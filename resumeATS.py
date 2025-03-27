@@ -2,6 +2,7 @@ import streamlit as st
 # Set page config first, before any other st commands
 st.set_page_config(page_title="ResumeATS Pro", layout="wide")
 
+import configparser
 import os
 from dotenv import load_dotenv
 import google.generativeai as genai
@@ -12,6 +13,16 @@ import hashlib
 import plotly.graph_objects as go
 import numpy as np
 from database import init_db, create_user, verify_user
+
+import time
+from datetime import datetime
+
+from selenium import webdriver
+from selenium.webdriver.edge.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 # Custom CSS for Apple-inspired design
 st.markdown("""
@@ -93,14 +104,11 @@ else:
     # Add feature selector
     feature = st.selectbox(
         "Select Feature",
-        ["Resume ATS Pro", "Auto Apply", "Resume Generation"],
+        ["Resume ATS Pro", "Auto Apply"],
         index=0
     )
     
     if feature == "Resume ATS Pro":
-        st.title("ResumeATS Pro")
-        st.subheader("Optimize Your Resume for ATS and Land Your Dream Job")
-        
         # Load environment variables and configure API
         load_dotenv()
         genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
@@ -131,7 +139,7 @@ else:
             st.session_state[f'score_{content_hash}'] = score
 
         class ATSScoreComponents:
-            def __init__(self):
+            def init(self):
                 self.format_score = 0
                 self.content_score = 0
                 self.keyword_score = 0
@@ -259,10 +267,6 @@ else:
             else:
                 raise FileNotFoundError("No file uploaded")
 
-        # Streamlit UI
-        st.title("ResumeATS Pro")
-        st.subheader("Optimize Your Resume for ATS and Land Your Dream Job")
-
         # File upload
         upload_file = st.file_uploader("Upload your resume (PDF)", type=["pdf"])
 
@@ -294,7 +298,6 @@ else:
                     Resume text: {pdf_text}
                     {f'Job Description: {job_description}' if use_jd else ''}
                     """
-
                 elif analysis_option == "Detailed Analysis":
                     prompt = f"""
                     You are an expert ATS analyzer. Provide a comprehensive analysis:
@@ -341,7 +344,6 @@ else:
                     Resume text: {pdf_text}
                     {f'Job Description: {job_description}' if use_jd else ''}
                     """
-
                 else:  # ATS Optimization
                     prompt = f"""
                     You are an expert ATS optimization specialist. Analyze with enhanced criteria:
@@ -388,7 +390,6 @@ else:
                     Resume text: {pdf_text}
                     {f'Job Description: {job_description}' if use_jd else ''}
                     """
-                
                 response = get_gemini_output(pdf_text, prompt)
                 
                 st.subheader("Analysis Results")
@@ -425,10 +426,308 @@ else:
         
     elif feature == "Auto Apply":
         st.title("Auto Apply")
-        st.subheader("Automatically Apply to Jobs")
-        st.info("🚧 This feature is coming soon! Stay tuned for updates.")
+        st.subheader("Automatically Apply to Jobs on Naukri.com")
+
+        # ----- Auto Apply Input Form -----
+        with st.form("auto_apply_form"):
+            job_type = st.selectbox("Job Type", options=["job", "internship"], index=0)
+            designation_input = st.text_input("Designation (comma separated)")
+            location_input = st.text_input("Location (comma separated)")
+            max_applications = st.number_input("Max Applications per Day", min_value=1, step=1)
+            yoe = st.number_input("Years of Experience", min_value=0, step=1)
+            salary = st.number_input("Expected Salary", min_value=0)
+            max_pages = st.number_input("Max Pages to Search", min_value=1, step=1)
+            min_match_score = st.number_input("Minimum Job Description Match Score (0 - 1)", min_value=0.0, max_value=1.0, step=0.1, value=0.0)
+            submitted = st.form_submit_button("Start Auto Apply")
         
-    elif feature == "Resume Generation":
-        st.title("Resume Generation")
-        st.subheader("Generate Professional Resumes")
-        st.info("🚧 This feature is coming soon! Stay tuned for updates.")
+        if submitted:
+            # Convert comma-separated strings to lists and strip extra whitespace
+            designations = [d.strip() for d in designation_input.split(",") if d.strip()]
+            locations = [l.strip() for l in location_input.split(",") if l.strip()]
+
+            # ---------- Auto Apply Functions ----------
+            def login_naukri(driver, wait, credentials):
+                """Log into Naukri.com using provided credentials."""
+                driver.get('https://login.naukri.com/')
+                st.write("Checkpoint: Navigated to login page.")
+                try:
+                    wait.until(EC.presence_of_element_located((By.ID, 'usernameField'))).send_keys(credentials['email'])
+                    wait.until(EC.presence_of_element_located((By.ID, 'passwordField'))).send_keys(credentials['password'])
+                    wait.until(EC.element_to_be_clickable((By.XPATH, "//button[text()='Login']"))).click()
+                    st.write("Checkpoint: Login successful.")
+                except Exception as e:
+                    st.write(f"Checkpoint: Login failed: {e}")
+                    driver.quit()
+                    exit()
+
+            def construct_url_for_combo(designation, location, job_type, page):
+                """Helper function to generate a URL for a single designation, location, and page."""
+                base_url = "https://www.naukri.com"
+                designation_slug = designation.lower().replace(' ', '-')
+                location_slug = location.lower().replace(' ', '-') if location else ""
+                
+                if job_type == "internship":
+                    if location_slug:
+                        url = (f"{base_url}/{designation_slug}-internship-jobs-in-{location_slug}"
+                            if page == 1 else
+                            f"{base_url}/internship/{designation_slug}-internship-jobs-in-{location_slug}-{page}")
+                    else:
+                        url = (f"{base_url}/{designation_slug}-internship-jobs"
+                            if page == 1 else
+                            f"{base_url}/internship/{designation_slug}-internship-jobs-{page}")
+                else:
+                    if location_slug:
+                        url = (f"{base_url}/{designation_slug}-jobs-in-{location_slug}"
+                            if page == 1 else
+                            f"{base_url}/{designation_slug}-jobs-in-{location_slug}-{page}")
+                    else:
+                        url = (f"{base_url}/{designation_slug}-jobs"
+                            if page == 1 else
+                            f"{base_url}/{designation_slug}-jobs-{page}")
+                return url
+
+            def construct_search_urls(designations, locations, job_type, max_pages):
+                """
+                For each combination of designation and location (both are lists of strings),
+                and for each page up to max_pages, generate a Naukri search URL.
+                """
+                urls = []
+                
+                for designation in designations:
+                    if locations:
+                        for location in locations:
+                            for page in range(1, max_pages + 1):
+                                url = construct_url_for_combo(designation, location, job_type, page)
+                                st.write(f"Checkpoint: Constructed URL: {url}")
+                                urls.append(url)
+                    else:
+                        for page in range(1, max_pages + 1):
+                            url = construct_url_for_combo(designation, "", job_type, page)
+                            st.write(f"Checkpoint: Constructed URL: {url}")
+                            urls.append(url)
+                            
+                return urls
+
+            def scrape_job_links(driver, wait, designations, locations, job_type, max_pages):
+                """Collect job links from search results for each designation and location combination."""
+                job_links = []
+                urls = construct_search_urls(designations, locations, job_type, max_pages)
+                
+                for url in urls:
+                    driver.get(url)
+                    st.write(f"Checkpoint: Navigated to search results: {url}")
+                    
+                    try:
+                        wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "span[title='Close']"))).click()
+                        st.write("Checkpoint: Closed a popup.")
+                    except Exception:
+                        pass
+                    
+                    try:
+                        jobs = wait.until(EC.presence_of_all_elements_located((By.CSS_SELECTOR, "a.title")))
+                        for job in jobs:
+                            job_url = job.get_attribute('href')
+                            if job_url and job_url not in job_links:
+                                job_links.append(job_url)
+                        st.write(f"Checkpoint: Found {len(jobs)} jobs on {url}")
+                    except TimeoutException:
+                        st.write(f"Checkpoint: No jobs found on {url}")
+                
+                st.write(f"Checkpoint: Total unique job links collected: {len(job_links)}")
+                return job_links
+
+            def extract_job_skills(driver, wait):
+                """
+                Attempt to locate and extract the 'Key Skills' from the job listing.
+                """
+                info = {
+                    'skill': [],
+                    'yoe': 0,
+                    'salary': [],
+                    'company_name': "Unknown Company",
+                    'designation': "Unknown Designation"
+                }
+                skill_texts = []
+                
+                try:
+                    parent_div = wait.until(EC.presence_of_element_located(
+                        (By.CSS_SELECTOR, "div.styles_key-skill_GIPn")
+                    ))
+                    child_div = parent_div.find_element(By.XPATH, ".//div[not(@class)]")
+                    skill_spans = child_div.find_elements(By.TAG_NAME, "span")
+                    for span in skill_spans:
+                        text = span.text.strip().lower()
+                        if text:
+                            skill_texts.append(text)
+                    if skill_texts:
+                        st.write(f"Checkpoint: Found {len(skill_texts)} skills from primary structure.")
+                        info['skill'] = skill_texts
+                except Exception as e:
+                    info['skill'] = skill_texts
+
+                try:
+                    company_div = WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located(
+                            (By.CSS_SELECTOR, "div.styles_jd-header-comp-name__MvqAI")
+                        )
+                    )
+                    try:
+                        company_name = company_div.find_element(By.TAG_NAME, "a").text.strip()
+                    except Exception as e:
+                        company_name = company_div.text.strip()
+                    info['company_name'] = company_name
+                except Exception as e:
+                    info['company_name'] = "Unknown Company"
+
+                try:
+                    designation_elem = WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located(
+                            (By.CSS_SELECTOR, "h1.styles_jd-header-title__rZwM1")
+                        )
+                    )
+                    designation = designation_elem.text.strip()
+                    info['designation'] = designation
+                except Exception as e:
+                    info['designation'] = "Unknown Designation"
+
+                try:
+                    exp_div = WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located(
+                            (By.CSS_SELECTOR, "div.styles_jhc_exp_k_giM")
+                        )
+                    )
+                    try:
+                        yoe_text = exp_div.find_element(By.TAG_NAME, "span").text.strip()
+                        info['yoe'] = int(yoe_text.split()[0])
+                    except Exception as e:
+                        try:
+                            info['yoe'] = int(exp_div.text.strip().split()[0])
+                        except Exception as e:
+                            info['yoe'] = 0
+                except Exception as e:
+                    info['yoe'] = 0
+
+                try:
+                    salary_div = WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located(
+                            (By.CSS_SELECTOR, "div.styles_jhc_salary_jdfEC")
+                        )
+                    )
+                    try:
+                        salary_text = salary_div.find_element(By.TAG_NAME, "span").text.strip()
+                        info['salary'] = list(map(float, salary_text.split()[0].split('-')))
+                    except Exception as e:
+                        try:
+                            info['salary'] = list(map(float, salary_div.text.strip().split()[0].split('-')))
+                        except Exception as e:
+                            info['salary'] = [0, 0]
+                except Exception as e:
+                    info['salary'] = [0, 0]
+
+                return info
+
+            def skills_match(job_skills, user_skills):
+                """
+                Calculate the percentage of user skills that are mentioned in the job's skills.
+                Returns the match percentage.
+                """
+                if not job_skills:
+                    return 0
+                count = 0
+                for sk in job_skills:
+                    if sk in user_skills:
+                        count += 1
+                percentage = (count / len(job_skills)) * 100
+                st.write(f"Checkpoint: {percentage:.2f}% of user skills matched.")
+                return percentage
+
+            def apply_to_jobs(driver, wait, job_links, max_applications, yoe, salary, user_skills, min_match_score, expected_domain):
+                """Apply to jobs after checking the skills match and update the application log in the DB."""
+                applied = 0
+                failed = []
+                for job_url in job_links:
+                    if applied >= max_applications:
+                        st.write("Checkpoint: Reached daily application limit.")
+                        break
+                    driver.get(job_url)
+                    st.write(f"Checkpoint: Navigated to job posting: {job_url}")
+                    try:
+                        driver.find_element(By.XPATH, "//div[contains(text(), 'Applied')]")
+                        st.write(f"Checkpoint: Already applied to {job_url}")
+                        continue
+                    except NoSuchElementException:
+                        pass
+                    job_text = extract_job_skills(driver, wait)
+
+                    if yoe < job_text['yoe']:
+                        continue
+
+                    if salary > job_text['salary'][1]:
+                        continue
+
+                    match_percentage = skills_match(job_text['skill'], user_skills)
+                    if match_percentage < min_match_score * 100:
+                        st.write(f"Checkpoint: Skipping {job_url}: Only {match_percentage:.2f}% user skills matched.")
+                        continue
+                    try:
+                        apply_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Apply')]")))
+                        apply_btn.click()
+                        st.write("Checkpoint: Clicked Apply button.")
+                        current_url = driver.current_url
+                        if expected_domain not in current_url:
+                            st.write(f"Checkpoint: Redirected externally from {job_url}. Skipping application.")
+                            driver.back()
+                            continue
+                        try:
+                            submit_btn = wait.until(EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Submit')]")))
+                            submit_btn.click()
+                            st.write(f"Checkpoint: Successfully applied to {job_url}")
+                        except Exception:
+                            st.write(f"Checkpoint: Quick applied to {job_url}")
+                        applied += 1
+                        try:
+                            limit_msg = driver.find_element(By.XPATH, "//*[contains(text(), 'daily quota')]")
+                            st.write(f"Checkpoint: Daily quota reached message detected: {limit_msg.text}")
+                            break
+                        except NoSuchElementException:
+                            pass
+                    except Exception as e:
+                        st.write(f"Checkpoint: Failed to apply to {job_url}: {str(e)}")
+                        failed.append(job_url)
+                st.write(f"Checkpoint: Applied to {applied} jobs.")
+                return applied, failed
+
+            def main(job_type, designations, locations, max_applications, yoe, max_pages, min_match_score, salary):
+                edge_driver_path = r"C:\Users\prath\Downloads\edgedriver_win64\msedgedriver.exe"
+                credentials = {
+                    'email': os.getenv('NAUKRI_EMAIL', 'prathamyadav0220@gmail.com'),
+                    'password': os.getenv('NAUKRI_PASSWORD', 'Pratham@2')
+                }
+                
+                # For simplicity, using static user skills; you can extend this as needed
+                user_skills = ['python', 'sql', 'c', 'c++', 'javascript']
+                expected_domain = "naukri.com"
+                
+                options = webdriver.EdgeOptions()
+                options.add_argument("--disable-blink-features=AutomationControlled")
+                options.add_argument("--start-maximized")
+                service = Service(edge_driver_path)
+                driver = webdriver.Edge(service=service, options=options)
+                wait = WebDriverWait(driver, 20)
+                
+                try:
+                    login_naukri(driver, wait, credentials)
+                    job_links = scrape_job_links(driver, wait, designations, locations, job_type, max_pages)
+                    st.write(f"Checkpoint: Total job links found: {len(job_links)}")
+                    if job_links:
+                        applied_count, failed_applications = apply_to_jobs(driver, wait, job_links, max_applications, yoe, salary, user_skills, min_match_score, expected_domain)
+                        st.write(f"Checkpoint: Applied to {applied_count} jobs. Failed: {len(failed_applications)}")
+                    else:
+                        st.write("Checkpoint: No job links found. Check search parameters.")
+                finally:
+                    driver.quit()
+                    st.write("Checkpoint: WebDriver session ended.")
+
+            st.info("Auto apply process started. Check the checkpoints below for progress updates.")
+            main(job_type, designations, locations, max_applications, yoe, max_pages, min_match_score, salary)
+            st.success("Auto apply process completed.")
