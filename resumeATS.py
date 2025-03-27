@@ -12,7 +12,7 @@ from collections import Counter
 import hashlib
 import plotly.graph_objects as go
 import numpy as np
-from database import init_db, create_user, verify_user
+from database import init_db, create_user, verify_user, get_data
 
 import time
 from datetime import datetime
@@ -53,6 +53,8 @@ if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
 if 'username' not in st.session_state:
     st.session_state.username = None
+if 'pdf_text' not in st.session_state:
+    st.session_state.pdf_text = None
 
 # Authentication UI
 def show_auth_ui():
@@ -62,10 +64,12 @@ def show_auth_ui():
         st.header("Login")
         login_username = st.text_input("Username", key="login_username")
         login_password = st.text_input("Password", type="password", key="login_password")
+        edgedriver_path = st.text_input("Edge Driver Path", key="edgeDriver_path")
         if st.button("Login"):
             if verify_user(login_username, login_password):
                 st.session_state.authenticated = True
                 st.session_state.username = login_username
+                st.session_state.edgedriver_path = edgedriver_path
                 st.success("Successfully logged in!")
                 st.rerun()
             else:
@@ -77,6 +81,7 @@ def show_auth_ui():
         new_email = st.text_input("Email", key="new_email")
         new_password = st.text_input("Password", type="password", key="new_password")
         confirm_password = st.text_input("Confirm Password", type="password", key="confirm_password")
+        edgedriver_path = st.text_input("Edge Driver Path", key="edgedriver_path_signup")
         
         if st.button("Sign Up"):
             if new_password != confirm_password:
@@ -85,6 +90,7 @@ def show_auth_ui():
                 st.error("Password must be at least 6 characters long")
             else:
                 if create_user(new_username, new_password, new_email):
+                    st.session_state.edgedriver_path = edgedriver_path
                     st.success("Account created successfully! Please login.")
                 else:
                     st.error("Username or email already exists")
@@ -260,12 +266,8 @@ else:
         def read_pdf(uploaded_file):
             if uploaded_file is not None:
                 pdf_reader = PdfReader(uploaded_file)
-                pdf_text = ""
-                for page in pdf_reader.pages:
-                    pdf_text += page.extract_text()
-                return pdf_text
-            else:
-                raise FileNotFoundError("No file uploaded")
+                return "".join([page.extract_text() for page in pdf_reader.pages])
+            raise FileNotFoundError("No file uploaded")
 
         # File upload
         upload_file = st.file_uploader("Upload your resume (PDF)", type=["pdf"])
@@ -284,7 +286,8 @@ else:
 
         if st.button("Analyze Resume"):
             if upload_file is not None:
-                pdf_text = read_pdf(upload_file)
+                st.session_state.pdf_text = read_pdf(upload_file)
+                pdf_text = st.session_state.pdf_text
                 
                 if analysis_option == "Quick Scan":
                     prompt = f"""
@@ -344,7 +347,7 @@ else:
                     Resume text: {pdf_text}
                     {f'Job Description: {job_description}' if use_jd else ''}
                     """
-                else:  # ATS Optimization
+                else:
                     prompt = f"""
                     You are an expert ATS optimization specialist. Analyze with enhanced criteria:
 
@@ -427,8 +430,25 @@ else:
     elif feature == "Auto Apply":
         st.title("Auto Apply")
         st.subheader("Automatically Apply to Jobs on Naukri.com")
+        
+        load_dotenv()
+        genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
+        model = genai.GenerativeModel("gemini-2.0-flash")
+        
+        # Resume upload for Auto Apply
+        auto_apply_resume = st.file_uploader("Upload Resume for Auto Apply", type=["pdf"])
+        if auto_apply_resume:
+            def read_pdf(uploaded_file):
+                if uploaded_file is not None:
+                    pdf_reader = PdfReader(uploaded_file)
+                    return "".join([page.extract_text() for page in pdf_reader.pages])
+                raise FileNotFoundError("No file uploaded")
+            st.session_state.pdf_text = read_pdf(auto_apply_resume)
+            
+        if 'pdf_text' not in st.session_state or not st.session_state.pdf_text:
+            st.error("Please upload a resume first")
+            st.stop()
 
-        # ----- Auto Apply Input Form -----
         with st.form("auto_apply_form"):
             job_type = st.selectbox("Job Type", options=["job", "internship"], index=0)
             designation_input = st.text_input("Designation (comma separated)")
@@ -441,11 +461,9 @@ else:
             submitted = st.form_submit_button("Start Auto Apply")
         
         if submitted:
-            # Convert comma-separated strings to lists and strip extra whitespace
             designations = [d.strip() for d in designation_input.split(",") if d.strip()]
             locations = [l.strip() for l in location_input.split(",") if l.strip()]
 
-            # ---------- Auto Apply Functions ----------
             def login_naukri(driver, wait, credentials):
                 """Log into Naukri.com using provided credentials."""
                 driver.get('https://login.naukri.com/')
@@ -697,15 +715,20 @@ else:
                 st.write(f"Checkpoint: Applied to {applied} jobs.")
                 return applied, failed
 
+            def extract_skills_from_resume():
+                prompt = "Extract technical skills from this resume:"
+                response = model.generate_content([st.session_state.pdf_text, prompt])
+                return [skill.lower() for skill in response.text.split(", ")]
+
             def main(job_type, designations, locations, max_applications, yoe, max_pages, min_match_score, salary):
-                edge_driver_path = r"C:\Users\prath\Downloads\edgedriver_win64\msedgedriver.exe"
-                credentials = {
-                    'email': os.getenv('NAUKRI_EMAIL', 'prathamyadav0220@gmail.com'),
-                    'password': os.getenv('NAUKRI_PASSWORD', 'Pratham@2')
-                }
+                edge_driver_path = st.session_state.get('edgedriver_path')
+                user_data = get_data()
+                credentials = {}
+                for email, password in user_data:
+                    credentials['email'] = email
+                    credentials['password'] = password
                 
-                # For simplicity, using static user skills; you can extend this as needed
-                user_skills = ['python', 'sql', 'c', 'c++', 'javascript']
+                user_skills = extract_skills_from_resume()
                 expected_domain = "naukri.com"
                 
                 options = webdriver.EdgeOptions()
