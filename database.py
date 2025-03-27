@@ -43,3 +43,11 @@ def verify_user(username, password):
     user = c.fetchone()
     conn.close()
     return user is not None
+
+def get_data():
+    conn = sqlite3.connect('user_data.db')
+    c = conn.cursor()
+    c.execute("SELECT email, password FROM users")
+    data = c.fetchall()
+    conn.close()
+    return data
