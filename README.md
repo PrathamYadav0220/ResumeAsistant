@@ -50,7 +50,7 @@ MIT License. See `LICENSE` for more information.
 
 ### Questions?
 
-Hit me up in the issues or at [mayankjainsikar1999@gmail.com].
+Hit me up in the issues or at [prathamyadav0220@gmail.com].
 
 ### Remember
 
